@@ -13,7 +13,7 @@ async function uploadFile(file, folderId) {
         return;
     }
 
-    let cancelled = false
+    const cancelToken = { cancelled: false };
 
     if(!uploadTemp) {uploadTemp = document.getElementById("uploadItem")}
     if(!uploadContainer) {uploadContainer = document.querySelector('[type="container.upload"]')}
@@ -29,7 +29,7 @@ async function uploadFile(file, folderId) {
     temp.querySelector('[type="span.time"]').textContent = "Estimating..."
 
     temp.querySelector('[type="icon.stop"]').addEventListener("click", () => {
-        cancelled = true
+        cancelToken.cancelled = true;
         wrapper.remove()
         if(!uploadContainer.childElementCount > 0) uploadContainer.parentElement.classList.add("d-none")
     })
@@ -43,22 +43,28 @@ async function uploadFile(file, folderId) {
 
     uploadContainer.parentElement.classList.remove("d-none")
 
-    let uploadId = "";
+    let uploadId = ('xxxxxxxx-xxxx-4xxx-Nxxx-xxxxxxxxxxxx'
+      .replace(/x/g, () => ((Math.random()*16)|0).toString(16))
+      .replace(/N/g, () => (((Math.random()*4)|0) + 8).toString(16)));
+
     const startedAt = performance.now();
 
-    function fmtDuration(sec) {
-        sec = Math.max(0, Math.round(sec));
-        const h = Math.floor(sec / 3600);
-        const m = Math.floor((sec % 3600) / 60);
-        const s = sec % 60;
-        if (h > 0) return `${h} hour, ${m} min left`;
-        if (m > 0) return `${m} min, ${s} sec left`;
-        if(!s > 0) return "Finalizing"
-        return `${s} seconds left`;
-    }
-    
+
+    var tasks = [];
+
     for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
-        if(cancelled) return
+        tasks[chunkIndex] = () => postChunk(chunkIndex, chunkSize, file, totalChunks,
+        fileName, folderId, uploadId, totalSize, startedAt, wrapper, cancelToken);
+    }
+
+    await runWithLimit(tasks, 10, cancelToken);
+    wrapper.remove()
+    if(!uploadContainer.childElementCount > 0) uploadContainer.parentElement.classList.add("d-none")
+    return true
+}
+async function postChunk(chunkIndex, chunkSize, file, totalChunks, fileName, folderId, uploadId, totalSize, startedAt, wrapper, cancelToken) {
+        if (cancelToken.cancelled) return;
+
         const start = chunkIndex * chunkSize;
         const end = Math.min(start + chunkSize, file.size);
         const chunk = file.slice(start, end);
@@ -82,7 +88,6 @@ async function uploadFile(file, folderId) {
             if(!uploadContainer.childElementCount > 0) uploadContainer.parentElement.classList.add("d-none")
             return;
         }
-        uploadId = await response.text()
 
         const uploadedBytes = end;
         const f = uploadedBytes / totalSize;
@@ -95,13 +100,53 @@ async function uploadFile(file, folderId) {
         } else{
             wrapper.querySelector('[type="span.time"]').textContent = isFinite(etaSec) ? fmtDuration(etaSec) : "estimating..."
         }
-        
+
         setCircleProgress(wrapper, pct);
-    }
-    wrapper.remove()
-    if(!uploadContainer.childElementCount > 0) uploadContainer.parentElement.classList.add("d-none")
-    return true
 }
+
+function fmtDuration(sec) {
+    sec = Math.max(0, Math.round(sec));
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = sec % 60;
+    if (h > 0) return `${h} hour, ${m} min left`;
+    if (m > 0) return `${m} min, ${s} sec left`;
+    if(!s > 0) return "Finalizing"
+    return `${s} seconds left`;
+}
+
+async function runWithLimit(tasks, limit, cancelToken) {
+  const results = [];
+  let index = 0;
+
+  async function worker() {
+    while (true) {
+      if (cancelToken?.cancelled) return;
+
+      const i = index++;
+      if (i >= tasks.length) return;
+
+      if (cancelToken?.cancelled) return;
+      results[i] = await tasks[i]();
+    }
+  }
+
+  const workers = Array.from(
+    { length: Math.min(limit, tasks.length) },
+    () => worker()
+  );
+
+  await Promise.all(workers);
+  return results;
+}
+
+async function uploadFiles(files, folderId, limit = 10) {
+  const taskFns = Array.from(files).map(file => () => uploadFile(file, folderId));
+  const results = await runWithConcurrencyLimit(taskFns, limit);
+
+  return { results, ok, failed };
+}
+
 
 function downloadFile(folderId, fileId) {
     fetch(`/api/files/download?folderId=${encodeURIComponent(folderId)}&fileId=${encodeURIComponent(fileId)}`, {

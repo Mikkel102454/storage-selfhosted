@@ -8,16 +8,12 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.file.StandardOpenOption;
+import java.nio.file.*;
 import java.time.LocalDateTime;
 import java.util.*;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
 
-import jakarta.servlet.http.HttpServletResponse;
 import org.apache.commons.io.input.BoundedInputStream;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
@@ -30,16 +26,13 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
-import server.phoestorage.datasource.download.DownloadEntity;
-import server.phoestorage.datasource.download.DownloadRepository;
+import server.phoestorage.classes.UploadState;
 import server.phoestorage.datasource.file.FileEntity;
 import server.phoestorage.datasource.file.FileRepository;
-import server.phoestorage.datasource.folder.FolderEntity;
 import server.phoestorage.datasource.folder.FolderRepository;
 import server.phoestorage.datasource.users.UserEntity;
 import server.phoestorage.datasource.users.UserRepository;
 import server.phoestorage.dto.FileEntry;
-import server.phoestorage.dto.FolderEntry;
 
 @Service
 public class FileService {
@@ -53,6 +46,9 @@ public class FileService {
 
     private final FileRepository fileRepository;
 
+    public static final ConcurrentHashMap<String, UploadState> ongoingUploads = new ConcurrentHashMap<>();
+
+
     @Autowired
     public FileService(AppUserDetailsService appUserDetailsService,
                        HandlerService handlerService,
@@ -63,50 +59,6 @@ public class FileService {
         this.folderRepository = folderRepository;
         this.userRepository = userRepository;
     }
-
-
-    private static void addToMeta(Path metaPath, long delta) throws IOException {
-        // Open/create for read+write so we can lock and update in-place
-        try (FileChannel ch = FileChannel.open(metaPath,
-                StandardOpenOption.CREATE, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
-
-            try (FileLock lock = ch.lock()) { // exclusive lock
-                ch.position(0);
-
-                ByteBuffer buf = ByteBuffer.allocate(64);
-                int read = ch.read(buf);
-                long current = 0L;
-                if (read > 0) {
-                    buf.flip();
-                    String s = StandardCharsets.UTF_8.decode(buf).toString().trim();
-                    if (!s.isEmpty()) {
-                        try {
-                            current = Long.parseLong(s);
-                        } catch (NumberFormatException ignored) {
-                            current = 0L; // corrupted/empty meta → treat as 0
-                        }
-                    }
-                }
-
-                long updated = Math.addExact(current, delta); // throws on overflow
-
-                // Rewrite atomically (truncate then write)
-                ch.truncate(0);
-                ch.position(0);
-                ByteBuffer out = StandardCharsets.UTF_8.encode(Long.toString(updated));
-                while (out.hasRemaining()) ch.write(out);
-                ch.force(true);
-            }
-        }
-    }
-
-    static long readMeta(Path metaPath) throws IOException {
-        if (!Files.exists(metaPath)) return 0L;
-        String s = Files.readString(metaPath, StandardCharsets.UTF_8).trim();
-        if (s.isEmpty()) return 0L;
-        try { return Long.parseLong(s); } catch (NumberFormatException e) { return 0L; }
-    }
-
 
     /**
      * Saves chunks of a file
@@ -119,80 +71,72 @@ public class FileService {
      * @return the exit code
      *
      */
-    public int saveChunk(int chunkId, MultipartFile file, String folderId, String fileName, String uploadId){
+    public int saveChunk(int chunkId, int totalChunks, MultipartFile file, String folderId, String fileName, String uploadId, long constChunkSize){
         try{
             String uuid = appUserDetailsService.getUserEntity().getUuid();
             if(fileExistByName(uuid, folderId, fileName)) {return -2;}
 
-            Path chunkDir = Paths.get(rootPath, uuid, "temp", "upload", uploadId);
-            Files.createDirectories(chunkDir);
+            Path storageDir = Paths.get(rootPath, uuid, "storage");
+            Files.createDirectories(storageDir);
 
 
+            Path finalFile = Paths.get(rootPath, uuid, "storage", uploadId + ".lock");
 
-            Path chunkPath = chunkDir.resolve("chunk_" + chunkId);
+            long offset = (long) chunkId * constChunkSize;
 
-            long written = 0L;
             try (InputStream is = file.getInputStream();
-                 OutputStream os = Files.newOutputStream(chunkPath)) {
-                byte[] buffer = new byte[8192];
-                int bytesRead;
-                while ((bytesRead = is.read(buffer)) != -1) {
-                    os.write(buffer, 0, bytesRead);
-                    written += bytesRead;
+                 FileChannel ch = FileChannel.open(
+                         finalFile,
+                         StandardOpenOption.CREATE,
+                         StandardOpenOption.WRITE
+                 )) {
+
+                try (FileLock lock = ch.lock(offset, Math.max(1L, file.getSize()), false)) {
+
+                    ch.position(offset);
+
+                    byte[] buffer = new byte[8192];
+                    int n;
+                    while ((n = is.read(buffer)) != -1) {
+                        ByteBuffer buf = ByteBuffer.wrap(buffer, 0, n);
+                        while (buf.hasRemaining()) {
+                            ch.write(buf);
+                        }
+                    }
+
+                    ch.force(false); // flush file contents
                 }
             }
 
-            Path metaPath = chunkDir.resolve("file.meta");
-            addToMeta(metaPath, written);
-
             UserEntity userEntity = appUserDetailsService.getUserEntity();
-            long dataUsed = readMeta(metaPath);
 
-            if(userEntity.getDataUsed() + dataUsed > userEntity.getDataLimit()) {return -3;}
+            if(userEntity.getDataUsed() + finalFile.toFile().length() > userEntity.getDataLimit()) {
+                return -3;
+            }
+
+            UploadState state = ongoingUploads.computeIfAbsent(
+                    uuid + ":" + uploadId,
+                    id -> new UploadState(totalChunks)
+            );
+
+            boolean complete;
+
+            synchronized (state) {
+                if (!state.received.get(chunkId)) {
+                    state.received.set(chunkId);
+                    state.receivedCount.incrementAndGet();
+                }
+                complete = state.receivedCount.get() == state.totalChunks;
+            }
+            if(complete){
+                return saveFileDatabase(folderId, fileName, finalFile);
+            }
+
 
             return 0;
         } catch (Exception e){
-            System.err.println(e);
+            e.printStackTrace();
             return -1;
-        }
-    }
-
-    /**
-     * Merges saved chunks into one file
-     *
-     * @param totalChunks total amount of chunks
-     * @return the internal file name
-     *
-     */
-    public String mergeChunk(int totalChunks, String uploadId){
-        try{
-            String uuid = appUserDetailsService.getUserEntity().getUuid();
-            Path chunkDir = Paths.get(rootPath, uuid, "temp", "upload", uploadId);
-
-            String fileName = UUID.randomUUID().toString();
-
-            Files.createDirectories(Paths.get(rootPath, uuid, "storage"));
-            Path outputPath = Paths.get(rootPath, uuid, "storage", fileName);
-
-            try (OutputStream os = Files.newOutputStream(outputPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
-                for (int i = 0; i < totalChunks; i++) {
-                    Path chunkFile = chunkDir.resolve("chunk_" + i);
-                    try (InputStream is = Files.newInputStream(chunkFile)) {
-                        byte[] buffer = new byte[8192];
-                        int bytesRead;
-                        while ((bytesRead = is.read(buffer)) != -1) {
-                            os.write(buffer, 0, bytesRead);
-                        }
-                    }
-                    Files.deleteIfExists(chunkDir.resolve("file.meta"));
-                    Files.deleteIfExists(chunkFile);
-                }
-                Files.delete(chunkDir);
-            }
-            return fileName;
-        }catch (Exception e){
-            System.err.println(e);
-            return null;
         }
     }
 
@@ -201,21 +145,16 @@ public class FileService {
      *
      * @param folderId the folder the file should be saved in
      * @param fileName the name of the saved file
-     * @param uploadId the current upload session id
-     * @param totalChunks the total amount of chunks
+     * @param filePath path to the name of the file being saved
      * @return exit code
      *
      */
-    public int saveFileDatabase(String folderId, String fileName, String uploadId, int totalChunks) {
+    public int saveFileDatabase(String folderId, String fileName, Path filePath) {
         try{
             String uuid = appUserDetailsService.getUserEntity().getUuid();
-
-            String internalName = mergeChunk(totalChunks, uploadId);
-            String internalPath = rootPath + uuid + "/storage/" + internalName;
-
-            Path path = Paths.get(internalPath);
-            if(fileExistByUuid(uuid, folderId, internalName)) {Files.delete(path); return 409;}
-            if(folderRepository.findByOwnerAndFolderId(uuid, folderId) == null) {Files.delete(path); return 404;}
+            String fileUuid = filePath.toFile().getName().split("\\.")[0];
+            if(fileExistByUuid(uuid, folderId, fileUuid)) {Files.delete(filePath); return 409;}
+            if(folderRepository.findByOwnerAndFolderId(uuid, folderId) == null) {Files.delete(filePath); return 404;}
 
             String extension;
 
@@ -226,19 +165,22 @@ public class FileService {
                 extension = "";
             }
 
+            Path movedPath = filePath.resolveSibling(fileUuid);
+            Files.move(filePath, movedPath);
+
             FileEntity fileEntity = new FileEntity();
-            fileEntity.setUuid(internalName);
+            fileEntity.setUuid(fileUuid);
             fileEntity.setOwner(uuid);
             fileEntity.setName(fileName);
             fileEntity.setExtension(extension);
             fileEntity.setFolderId(folderId);
-            fileEntity.setInternalPath(internalPath);
+            fileEntity.setInternalPath(movedPath.toString());
             fileEntity.setCreated(LocalDateTime.now().toString());
-            fileEntity.setSize(Files.size(path));
+            fileEntity.setSize(Files.size(movedPath));
             fileEntity.setStarred(false);
 
             UserEntity userEntity = appUserDetailsService.getUserEntity();
-            userEntity.setDataUsed(userEntity.getDataUsed() + Files.size(path));
+            userEntity.setDataUsed(userEntity.getDataUsed() + Files.size(movedPath));
 
             fileRepository.save(fileEntity);
             return 0;

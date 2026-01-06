@@ -18,7 +18,7 @@ async function getFolderLocation(folderUuid){
     ));
 }
 
-async function uploadFolder(folderId, folderName) {
+async function uploadFolder(folderId, folderName, show = false) {
     const response = await fetch(`/api/folders/upload?folderId=${encodeURIComponent(folderId)}&folderName=${encodeURIComponent(folderName)}`, {
         method: "POST"
     });
@@ -35,9 +35,9 @@ async function uploadFolder(folderId, folderName) {
         result.size
     );
 
-    await folder.load(viewContainerDrive)
+    if (show) await folder.load(viewContainerDrive)
 
-    return true
+    return folder.uuid
 }
 
 async function browseDirectory(folderId) {
@@ -131,7 +131,7 @@ async function getParentFolder(folderId, folderName){
     });
 
     if (!response.ok) {
-        handleServerReturnAlert(response.status, await response.text())
+        //handleServerReturnAlert(response.status, await response.text())
         return null;
     }
 
@@ -172,7 +172,7 @@ async function FolderUploading(filesList) {
 
                 if (i === 0) {
                     // Always create the top-level folder (e.g., "MyFolder")
-                    folderId = await uploadFolder(parentId, folderName);
+                    folderId = await uploadFolder(parentId, folderName, true);
                 } else {
                     // Try to fetch, or create if missing
                     folderId = await getParentFolder(parentId, folderName).uuid;
@@ -185,6 +185,7 @@ async function FolderUploading(filesList) {
             }
 
             parentId = folderIdCache.get(cacheKey);
+            console.log(parentId)
         }
         await refreshDirectoryDrive()
         await uploadFile(file, parentId);

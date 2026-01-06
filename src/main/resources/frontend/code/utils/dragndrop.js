@@ -125,11 +125,11 @@ async function initDragnDrop() {
         }
 
         // Prepare helpers
-        const ensurePath = makeEnsurer(getFolderLocation, uploadFolder);
+        const ensurePath = makeEnsurer(getFolderLocation, uploadFolder, true);
         const uploadWithPath = async (relPath, file) => {
             const parentId = await ensurePath(rootFolderId, relPath);
-            // IMPORTANT: suppress per-file notifications
-            await uploadFile(file, parentId, false);
+
+            await uploadFile(file, parentId);
         };
 
         try {
@@ -138,7 +138,7 @@ async function initDragnDrop() {
             const loose = Array.from(e.dataTransfer.files || [])
                 .filter(f => !f.webkitRelativePath && f.size > 0);
             for (const f of loose) {
-                await uploadFile(f, rootFolderId, false);
+                await uploadFile(f, rootFolderId);
             }
 
             // 2) Handle folders via DnD items

@@ -39,7 +39,7 @@ public class FileController {
             @RequestParam("totalChunks") int totalChunks,
             @RequestParam("fileName") String fileName,
             @RequestParam("folderId") String folderId,
-            @RequestParam(name = "uploadId", required = false) String uploadId
+            @RequestParam(name = "uploadId") String uploadId
     ){
         if (file.getSize() > 10 * 1024 * 1024) {
             return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
@@ -48,31 +48,28 @@ public class FileController {
 
         fileName = fileName.replaceAll("\\s+", " ").trim();
 
-        if(uploadId == null || uploadId.isEmpty()) {uploadId = UUID.randomUUID().toString();}
+        //if(uploadId == null || uploadId.isEmpty()) {uploadId = UUID.randomUUID().toString();}
+        if(uploadId == null || uploadId.isEmpty()) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body("An Upload ID is required");
+        }
 
-        int chunkCode = fileService.saveChunk(chunkIndex, file, folderId, fileName, uploadId);
+        int chunkCode = fileService.saveChunk(chunkIndex, totalChunks, file, folderId, fileName, uploadId, 10 * 1024 * 1024);
         if(chunkCode == -2) {
             return ResponseEntity.status(HttpStatus.CONFLICT).body("A file is already named that in this directory");
         }
         if(chunkCode == -3) {
             return ResponseEntity.status(HttpStatus.INSUFFICIENT_STORAGE).body("You dont have enough space for this file");
         }
+        if(chunkCode == 409){
+            return ResponseEntity.status(HttpStatus.CONFLICT).body("Something happened");
+        }
+        if(chunkCode == 404){
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body("Not found");
+        }
         if(chunkCode != 0) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(handlerService.get500(new Exception(String.valueOf(chunkCode))));
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("Something happened");
         }
 
-        if(chunkIndex >= totalChunks - 1) {
-            int code = fileService.saveFileDatabase(folderId, fileName, uploadId, totalChunks);
-            if(code != 0){
-                if(code == 409){
-                    return ResponseEntity.status(HttpStatus.CONFLICT).body("Something happened");
-                }
-                if(code == 404){
-                    return ResponseEntity.status(HttpStatus.NOT_FOUND).body("Not found");
-                }
-                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body("Something happened");
-            }
-        }
         return ResponseEntity.ok(uploadId);
     }
 
