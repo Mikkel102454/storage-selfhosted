@@ -41,7 +41,7 @@ public class FileController {
             @RequestParam("folderId") String folderId,
             @RequestParam(name = "uploadId") String uploadId
     ){
-        if (file.getSize() > 10 * 1024 * 1024) {
+        if (file.getSize() > 1024 * 1024 * 5) {
             return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
                     .body("Chunk too large (max 10 MB) the chunk was " + file.getSize() + " Bytes");
         }
@@ -53,7 +53,7 @@ public class FileController {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body("An Upload ID is required");
         }
 
-        int chunkCode = fileService.saveChunk(chunkIndex, totalChunks, file, folderId, fileName, uploadId, 10 * 1024 * 1024);
+        int chunkCode = fileService.saveChunk(chunkIndex, totalChunks, file, folderId, fileName, uploadId, 1024 * 1024 * 5);
         if(chunkCode == -2) {
             return ResponseEntity.status(HttpStatus.CONFLICT).body("A file is already named that in this directory");
         }

@@ -10,7 +10,7 @@ spring:
       spec: initialCapacity=20, maximumSize=100, expireAfterWrite=20m
 
   profiles:
-    active: dev
+    active: prod
 
   thymeleaf:
     prefix: classpath:/

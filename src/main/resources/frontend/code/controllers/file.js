@@ -2,7 +2,7 @@ let uploadTemp;
 let uploadContainer;
 
 async function uploadFile(file, folderId) {
-    const chunkSize = 10 * 1024 * 1024; // 10 MB
+    const chunkSize = 1024 * 1024 * 5; // 5 MB
 
     if (!file) {
         throwWarning("You did not upload a file")
@@ -57,7 +57,7 @@ async function uploadFile(file, folderId) {
         fileName, folderId, uploadId, totalSize, startedAt, wrapper, cancelToken);
     }
 
-    await runWithLimit(tasks, 10, cancelToken);
+    await runWithLimit(tasks, 4, cancelToken);
     wrapper.remove()
     if(!uploadContainer.childElementCount > 0) uploadContainer.parentElement.classList.add("d-none")
     return true
